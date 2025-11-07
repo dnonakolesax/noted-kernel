@@ -110,11 +110,7 @@ func (hh *handler) runQueue() {
 		expectedName := hh.exportPrefix + msg.name
 		v, err := msg.pq.Lookup(expectedName)
 		if err != nil {
-			message := KernelMessage{}
-			message.KernelID = hh.kid
-			message.BlockID = msg.name
-			message.Fail = true
-			message.Result = err.Error()
+			message := KernelMessage{KernelID: hh.kid, BlockID: msg.name, Fail: true, Result: fmt.Sprintf("error: %s", err.Error())}
 			bts, _ := json.Marshal(message)
 			err := hh.queue.SendBytesWithRetry(context.Background(), bts)
 			if err != nil {
@@ -131,11 +127,7 @@ func (hh *handler) runQueue() {
 				if r := recover(); r != nil {
 					fmt.Println("panic occured: ", r)
 
-					message := KernelMessage{}
-					message.KernelID = hh.kid
-					message.BlockID = msg.name
-					message.Fail = true
-					message.Result = fmt.Sprintf("panic: %v", r)
+					message := KernelMessage{KernelID: hh.kid, BlockID: msg.name, Fail: true, Result: fmt.Sprintf("panic: %v", r)}
 					bts, _ := json.Marshal(message)
 					err := hh.queue.SendBytesWithRetry(context.Background(), bts)
 					if err != nil {
@@ -165,11 +157,7 @@ func (hh *handler) runQueue() {
 		w.Close()
 		os.Stdout = old
 		out := <-outC
-		message := KernelMessage{}
-		message.KernelID = hh.kid
-		message.BlockID = msg.name
-		message.Fail = tout
-		message.Result = out
+		message := KernelMessage{KernelID: hh.kid, BlockID: msg.name, Fail: tout, Result: out}
 		if tout {
 			message.Result = fmt.Sprintf("error: timeout %d seconds exceeded\n", hh.blockTimeout) + message.Result
 		}
