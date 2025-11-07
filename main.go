@@ -65,6 +65,7 @@ func NewHandler(queue *rabbit.RabbitProducer, kid string, mountPath string, expo
 		mountPath:    mountPath,
 		blockTimeout: time.Duration(blockTimeout),
 		blockPrefix:  blockPrefix,
+		exportPrefix: exportPrefix,
 	}
 }
 
@@ -73,6 +74,14 @@ func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 
 	pluginName := hh.mountPath + "/" + hh.kid + "/" + userID + "/" + hh.blockPrefix + blockID + ".so"
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("panic occured: ", r)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}()
+
 	p, err := plugin.Open(pluginName)
 	if err != nil {
 		fmt.Fprintf(w, "Error opening plugin %s, path: %s", err.Error(), pluginName)
