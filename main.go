@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"plugin"
+	"strconv"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -45,20 +47,24 @@ type handler struct {
 	kid          string
 	mountPath    string
 	exportPrefix string
+	blockTimeout time.Duration
+	blockPrefix  string
 }
 
 var mutex sync.Mutex
 
-func NewHandler(queue *amqp.Channel, kid string, mountPath string, exportPrefix string) *handler {
+func NewHandler(queue *amqp.Channel, kid string, mountPath string, exportPrefix string, blockTimeout int, blockPrefix string) *handler {
 	return &handler{
-		queue:     queue,
-		pq:        make(Queue, 0),
-		qmx:       &sync.Mutex{},
-		qcond:     sync.NewCond(&mutex),
-		vars:      make(map[string]any, 10),
-		funcs:     make(map[string]any, 10),
-		kid:       kid,
-		mountPath: mountPath,
+		queue:        queue,
+		pq:           make(Queue, 0),
+		qmx:          &sync.Mutex{},
+		qcond:        sync.NewCond(&mutex),
+		vars:         make(map[string]any, 10),
+		funcs:        make(map[string]any, 10),
+		kid:          kid,
+		mountPath:    mountPath,
+		blockTimeout: time.Duration(blockTimeout),
+		blockPrefix:  blockPrefix,
 	}
 }
 
@@ -66,7 +72,7 @@ func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	blockID := r.URL.Query().Get("block_id")
 	userID := r.URL.Query().Get("user_id")
 
-	pluginName := hh.mountPath + "" + hh.kid + "/" + userID + "/" + "block_" + blockID + ".so"
+	pluginName := hh.mountPath + "/" + hh.kid + "/" + userID + "/" + hh.blockPrefix + blockID + ".so"
 	p, err := plugin.Open(pluginName)
 	if err != nil {
 		fmt.Fprintf(w, "Error opening plugin %s", err.Error())
@@ -118,12 +124,13 @@ func (hh *handler) runQueue(queueName string) {
 				amqp.Publishing{
 					ContentType: "application/json",
 					Body:        bts,
-				})	
+				})
 			continue
 		}
 		old := os.Stdout
 		r, w, _ := os.Pipe()
 		os.Stdout = w
+		tout := false
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -146,7 +153,18 @@ func (hh *handler) runQueue(queueName string) {
 						})
 				}
 			}()
-			v.(func(*map[string]any, *map[string]any))(&hh.vars, &hh.funcs)
+			tt := time.NewTimer(time.Second * hh.blockTimeout)
+			doneChan := make(chan any)
+
+			go func() {
+				v.(func(*map[string]any, *map[string]any))(&hh.vars, &hh.funcs)
+				doneChan <- struct{}{}
+			}()
+			select {
+			case <-tt.C:
+				tout = true
+			case <-doneChan:
+			}
 		}()
 		outC := make(chan string)
 		go func() {
@@ -160,8 +178,11 @@ func (hh *handler) runQueue(queueName string) {
 		message := KernelMessage{}
 		message.KernelID = hh.kid
 		message.BlockID = msg.name
-		message.Fail = false
+		message.Fail = tout
 		message.Result = out
+		if tout {
+			message.Result = fmt.Sprintf("error: timeout %d seconds exceeded\n", hh.blockTimeout) + message.Result
+		}
 		bts, _ := json.Marshal(message)
 		_ = hh.queue.PublishWithContext(context.Background(),
 			"",        // exchange
@@ -198,7 +219,10 @@ func main() {
 	kernelId := os.Getenv("KERNEL_ID")
 	mountPath := os.Getenv("MOUNT_PATH")
 	exportPrefix := os.Getenv("EXPORT_PREFIX")
-	hh := NewHandler(ch, kernelId, mountPath, exportPrefix)
+	blockPrefix := os.Getenv("BLOCK_PREFIX")
+	toutStr := os.Getenv("TIMEOUT")
+	tout, _ := strconv.Atoi(toutStr)
+	hh := NewHandler(ch, kernelId, mountPath, exportPrefix, tout, blockPrefix)
 	queueName := os.Getenv("CHAN_NAME")
 
 	http.HandleFunc("/run", hh.Process)
