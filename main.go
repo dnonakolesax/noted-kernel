@@ -204,7 +204,7 @@ func main() {
 	mountPath := os.Getenv("MOUNT_PATH")
 	exportPrefix := os.Getenv("EXPORT_PREFIX")
 	blockPrefix := os.Getenv("BLOCK_PREFIX")
-	toutStr := os.Getenv("TIMEOUT")
+	toutStr := os.Getenv("BLOCK_TIMEOUT")
 	tout, _ := strconv.Atoi(toutStr)
 	hh := NewHandler(r, kernelId, mountPath, exportPrefix, tout, blockPrefix)
 
