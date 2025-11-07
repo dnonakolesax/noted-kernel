@@ -21,7 +21,7 @@ RUN GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
     go build -o ./bin/noted-kernel main.go
 
 # Запуск в пустом контейнере
-FROM scratch
+FROM gcr.io/distroless/base
 
 # Копируем пользователя без прав с прошлого этапа
 COPY --from=builder /etc/passwd /etc/passwd
