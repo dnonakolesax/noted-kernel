@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/dnonakolesax/noted-kernel/rabbit"
 )
 
 type pluginMessage struct {
@@ -38,7 +38,7 @@ func (q *Queue) Pop() (pluginMessage, bool) {
 }
 
 type handler struct {
-	queue        *amqp.Channel
+	queue        *rabbit.RabbitProducer
 	qmx          *sync.Mutex
 	qcond        *sync.Cond
 	pq           Queue
@@ -53,7 +53,7 @@ type handler struct {
 
 var mutex sync.Mutex
 
-func NewHandler(queue *amqp.Channel, kid string, mountPath string, exportPrefix string, blockTimeout int, blockPrefix string) *handler {
+func NewHandler(queue *rabbit.RabbitProducer, kid string, mountPath string, exportPrefix string, blockTimeout int, blockPrefix string) *handler {
 	return &handler{
 		queue:        queue,
 		pq:           make(Queue, 0),
@@ -96,7 +96,7 @@ type KernelMessage struct {
 	Fail     bool   `json:"fail"`
 }
 
-func (hh *handler) runQueue(queueName string) {
+func (hh *handler) runQueue() {
 	for {
 		hh.qmx.Lock()
 		msg, ok := hh.pq.Pop()
@@ -116,15 +116,10 @@ func (hh *handler) runQueue(queueName string) {
 			message.Fail = true
 			message.Result = err.Error()
 			bts, _ := json.Marshal(message)
-			_ = hh.queue.PublishWithContext(context.Background(),
-				"",        // exchange
-				queueName, // routing key
-				false,     // mandatory
-				false,     // immediate
-				amqp.Publishing{
-					ContentType: "application/json",
-					Body:        bts,
-				})
+			err := hh.queue.SendBytesWithRetry(context.Background(), bts)
+			if err != nil {
+				panic(err)
+			}
 			continue
 		}
 		old := os.Stdout
@@ -142,15 +137,10 @@ func (hh *handler) runQueue(queueName string) {
 					message.Fail = true
 					message.Result = fmt.Sprintf("panic: %v", r)
 					bts, _ := json.Marshal(message)
-					_ = hh.queue.PublishWithContext(context.Background(),
-						"",        // exchange
-						queueName, // routing key
-						false,     // mandatory
-						false,     // immediate
-						amqp.Publishing{
-							ContentType: "application/json",
-							Body:        bts,
-						})
+					err := hh.queue.SendBytesWithRetry(context.Background(), bts)
+					if err != nil {
+						panic(err)
+					}
 				}
 			}()
 			tt := time.NewTimer(time.Second * hh.blockTimeout)
@@ -184,36 +174,32 @@ func (hh *handler) runQueue(queueName string) {
 			message.Result = fmt.Sprintf("error: timeout %d seconds exceeded\n", hh.blockTimeout) + message.Result
 		}
 		bts, _ := json.Marshal(message)
-		_ = hh.queue.PublishWithContext(context.Background(),
-			"",        // exchange
-			queueName, // routing key
-			false,     // mandatory
-			false,     // immediate
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        bts,
-			})
+		err = hh.queue.SendBytesWithRetry(context.Background(), bts)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
 func main() {
 	amqpAddr := os.Getenv("RMQ_ADDR")
-	conn, err := amqp.Dial(amqpAddr)
+	queueName := os.Getenv("CHAN_NAME")
+	rConfig := rabbit.RabbitMQConfig{
+		URL:        amqpAddr,
+		Queue:      queueName,
+		MaxRetries: 5,
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   15 * time.Second,
+	}
+
+	r, err := rabbit.NewMessageSender(rConfig)
+
 	if err != nil {
-		log.Fatalf("unable to open connect to RabbitMQ server. Error: %s", err)
+		panic(err)
 	}
 
 	defer func() {
-		_ = conn.Close()
-	}()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("failed to open a channel. Error: %s", err)
-	}
-
-	defer func() {
-		_ = ch.Close()
+		_ = r.Close()
 	}()
 
 	kernelId := os.Getenv("KERNEL_ID")
@@ -222,8 +208,7 @@ func main() {
 	blockPrefix := os.Getenv("BLOCK_PREFIX")
 	toutStr := os.Getenv("TIMEOUT")
 	tout, _ := strconv.Atoi(toutStr)
-	hh := NewHandler(ch, kernelId, mountPath, exportPrefix, tout, blockPrefix)
-	queueName := os.Getenv("CHAN_NAME")
+	hh := NewHandler(r, kernelId, mountPath, exportPrefix, tout, blockPrefix)
 
 	http.HandleFunc("/run", hh.Process)
 	http.HandleFunc("/alive", func(w http.ResponseWriter, _ *http.Request) {
@@ -231,7 +216,7 @@ func main() {
 	})
 
 	go func() {
-		hh.runQueue(queueName)
+		hh.runQueue()
 	}()
 
 	fmt.Println("Server starting on port 8080...")
