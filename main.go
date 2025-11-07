@@ -75,7 +75,7 @@ func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	pluginName := hh.mountPath + "/" + hh.kid + "/" + userID + "/" + hh.blockPrefix + blockID + ".so"
 	p, err := plugin.Open(pluginName)
 	if err != nil {
-		fmt.Fprintf(w, "Error opening plugin %s", err.Error())
+		fmt.Fprintf(w, "Error opening plugin %s, path: %s", err.Error(), pluginName)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -110,6 +110,7 @@ func (hh *handler) runQueue() {
 		expectedName := hh.exportPrefix + msg.name
 		v, err := msg.pq.Lookup(expectedName)
 		if err != nil {
+			fmt.Printf("error looking for %s", expectedName)
 			message := KernelMessage{KernelID: hh.kid, BlockID: msg.name, Fail: true, Result: fmt.Sprintf("error: %s", err.Error())}
 			bts, _ := json.Marshal(message)
 			err := hh.queue.SendBytesWithRetry(context.Background(), bts)
