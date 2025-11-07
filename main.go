@@ -36,26 +36,29 @@ func (q *Queue) Pop() (pluginMessage, bool) {
 }
 
 type handler struct {
-	queue *amqp.Channel
-	qmx   *sync.Mutex
-	qcond *sync.Cond
-	pq    Queue
-	vars  map[string]any
-	funcs map[string]any
-	kid   string
+	queue        *amqp.Channel
+	qmx          *sync.Mutex
+	qcond        *sync.Cond
+	pq           Queue
+	vars         map[string]any
+	funcs        map[string]any
+	kid          string
+	mountPath    string
+	exportPrefix string
 }
 
 var mutex sync.Mutex
 
-func NewHandler(queue *amqp.Channel, kid string) *handler {
+func NewHandler(queue *amqp.Channel, kid string, mountPath string, exportPrefix string) *handler {
 	return &handler{
-		queue: queue,
-		pq:    make(Queue, 0),
-		qmx:   &sync.Mutex{},
-		qcond: sync.NewCond(&mutex),
-		vars:  make(map[string]any, 10),
-		funcs: make(map[string]any, 10),
-		kid:   kid,
+		queue:     queue,
+		pq:        make(Queue, 0),
+		qmx:       &sync.Mutex{},
+		qcond:     sync.NewCond(&mutex),
+		vars:      make(map[string]any, 10),
+		funcs:     make(map[string]any, 10),
+		kid:       kid,
+		mountPath: mountPath,
 	}
 }
 
@@ -63,8 +66,7 @@ func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	blockID := r.URL.Query().Get("block_id")
 	userID := r.URL.Query().Get("user_id")
 
-	pluginName := "/noted/codes/" + hh.kid + "/" + userID + "/" + "block_" + blockID + ".so"
-	fmt.Printf("plugin name: %s", pluginName)
+	pluginName := hh.mountPath + "" + hh.kid + "/" + userID + "/" + "block_" + blockID + ".so"
 	p, err := plugin.Open(pluginName)
 	if err != nil {
 		fmt.Fprintf(w, "Error opening plugin %s", err.Error())
@@ -88,7 +90,7 @@ type KernelMessage struct {
 	Fail     bool   `json:"fail"`
 }
 
-func (hh *handler) runQueue() {
+func (hh *handler) runQueue(queueName string) {
 	for {
 		hh.qmx.Lock()
 		msg, ok := hh.pq.Pop()
@@ -99,7 +101,7 @@ func (hh *handler) runQueue() {
 			mutex.Unlock()
 			continue
 		}
-		expectedName := "Export_block_" + msg.name
+		expectedName := hh.exportPrefix + msg.name
 		v, err := msg.pq.Lookup(expectedName)
 		if err != nil {
 			message := KernelMessage{}
@@ -108,15 +110,15 @@ func (hh *handler) runQueue() {
 			message.Fail = true
 			message.Result = err.Error()
 			bts, _ := json.Marshal(message)
-			hh.queue.PublishWithContext(context.Background(),
-				"",              // exchange
-				"noted-kernels", // routing key
-				false,           // mandatory
-				false,           // immediate
+			_ = hh.queue.PublishWithContext(context.Background(),
+				"",        // exchange
+				queueName, // routing key
+				false,     // mandatory
+				false,     // immediate
 				amqp.Publishing{
 					ContentType: "application/json",
 					Body:        bts,
-				})
+				})	
 			continue
 		}
 		old := os.Stdout
@@ -134,10 +136,10 @@ func (hh *handler) runQueue() {
 					message.Result = fmt.Sprintf("panic: %v", r)
 					bts, _ := json.Marshal(message)
 					_ = hh.queue.PublishWithContext(context.Background(),
-						"",              // exchange
-						"noted-kernels", // routing key
-						false,           // mandatory
-						false,           // immediate
+						"",        // exchange
+						queueName, // routing key
+						false,     // mandatory
+						false,     // immediate
 						amqp.Publishing{
 							ContentType: "application/json",
 							Body:        bts,
@@ -149,13 +151,11 @@ func (hh *handler) runQueue() {
 		outC := make(chan string)
 		go func() {
 			var buf bytes.Buffer
-			io.Copy(&buf, r)
+			_, _ = io.Copy(&buf, r)
 			outC <- buf.String()
 		}()
-
-		// back to normal state
 		w.Close()
-		os.Stdout = old // restoring the real stdout
+		os.Stdout = old
 		out := <-outC
 		message := KernelMessage{}
 		message.KernelID = hh.kid
@@ -163,11 +163,11 @@ func (hh *handler) runQueue() {
 		message.Fail = false
 		message.Result = out
 		bts, _ := json.Marshal(message)
-		hh.queue.PublishWithContext(context.Background(),
-			"",              // exchange
-			"noted-kernels", // routing key
-			false,           // mandatory
-			false,           // immediate
+		_ = hh.queue.PublishWithContext(context.Background(),
+			"",        // exchange
+			queueName, // routing key
+			false,     // mandatory
+			false,     // immediate
 			amqp.Publishing{
 				ContentType: "application/json",
 				Body:        bts,
@@ -176,14 +176,14 @@ func (hh *handler) runQueue() {
 }
 
 func main() {
-	amqpAddr := os.Args[1] // "amqp://guest:guest@172.26.0.2:5672/"
+	amqpAddr := os.Getenv("RMQ_ADDR")
 	conn, err := amqp.Dial(amqpAddr)
 	if err != nil {
 		log.Fatalf("unable to open connect to RabbitMQ server. Error: %s", err)
 	}
 
 	defer func() {
-		_ = conn.Close() // Закрываем подключение в случае удачной попытки подключения
+		_ = conn.Close()
 	}()
 
 	ch, err := conn.Channel()
@@ -192,19 +192,24 @@ func main() {
 	}
 
 	defer func() {
-		_ = ch.Close() // Закрываем подключение в случае удачной попытки подключения
+		_ = ch.Close()
 	}()
 
-	kernelId := os.Args[2]
-	hh := NewHandler(ch, kernelId)
+	kernelId := os.Getenv("KERNEL_ID")
+	mountPath := os.Getenv("MOUNT_PATH")
+	exportPrefix := os.Getenv("EXPORT_PREFIX")
+	hh := NewHandler(ch, kernelId, mountPath, exportPrefix)
+	queueName := os.Getenv("CHAN_NAME")
 
 	http.HandleFunc("/run", hh.Process)
+	http.HandleFunc("/alive", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
 	go func() {
-		hh.runQueue()
+		hh.runQueue(queueName)
 	}()
 
-	// Start the HTTP server on port 8080
 	fmt.Println("Server starting on port 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
