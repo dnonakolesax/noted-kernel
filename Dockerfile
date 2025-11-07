@@ -17,7 +17,7 @@ ADD . /noted-kernel
 WORKDIR /noted-kernel
 
 # Сборка
-RUN GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+RUN GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
     go build -o ./bin/noted-kernel main.go
 
 # Запуск в пустом контейнере
