@@ -1,11 +1,11 @@
 # Установка модулей
-FROM golang:1.25.3 as modules
+FROM golang:1.25.3 AS modules
 
 ADD go.mod go.sum /m/
 RUN cd /m && go mod download
 
 # Сборка приложения
-FROM golang:1.25.3 as builder
+FROM golang:1.25.3 AS builder
 
 COPY --from=modules /go/pkg /go/pkg
 
