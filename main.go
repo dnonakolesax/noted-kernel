@@ -18,8 +18,9 @@ import (
 )
 
 type pluginMessage struct {
-	pq   *plugin.Plugin
-	name string
+	pq      *plugin.Plugin
+	name    string
+	attempt string
 }
 
 type Queue []pluginMessage
@@ -72,6 +73,7 @@ func NewHandler(queue *rabbit.RabbitProducer, kid string, mountPath string, expo
 func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	blockID := r.URL.Query().Get("block_id")
 	userID := r.URL.Query().Get("user_id")
+	attempt := r.URL.Query().Get("attempt")
 
 	pluginName := hh.mountPath + "/" + hh.kid + "/" + userID + "/" + hh.blockPrefix + blockID + ".so"
 
@@ -90,7 +92,7 @@ func (hh *handler) Process(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hh.qmx.Lock()
-	hh.pq = append(hh.pq, pluginMessage{pq: p, name: blockID})
+	hh.pq = append(hh.pq, pluginMessage{pq: p, name: blockID, attempt: attempt})
 	hh.qmx.Unlock()
 	mutex.Lock()
 	hh.qcond.Broadcast()
@@ -116,7 +118,7 @@ func (hh *handler) runQueue() {
 			mutex.Unlock()
 			continue
 		}
-		expectedName := hh.exportPrefix + msg.name
+		expectedName := hh.exportPrefix + msg.name + "_" + msg.attempt
 		v, err := msg.pq.Lookup(expectedName)
 		if err != nil {
 			fmt.Printf("error looking for %s", expectedName)
